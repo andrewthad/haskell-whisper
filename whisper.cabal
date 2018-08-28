@@ -1,0 +1,39 @@
+name: whisper
+version: 0.1.0.0
+description: Please see the README on GitHub at <https://github.com/andrewthad/whisper#readme>
+homepage: https://github.com/andrewthad/whisper#readme
+bug-reports: https://github.com/andrewthad/whisper/issues
+author: Andrew Martin
+maintainer: andrew.thaddeus@gmail.com
+copyright: 2018 Andrew Martin
+license: BSD3
+license-file: LICENSE
+build-type: Simple
+cabal-version: >= 1.10
+extra-source-files:
+  ChangeLog.md
+  README.md
+
+source-repository head
+  type: git
+  location: https://github.com/andrewthad/whisper
+
+library
+  exposed-modules: Data.Whisper
+  hs-source-dirs: src
+  build-depends:
+      base >=4.12 && <5
+    , packed
+    , primitive >= 0.6.4
+  default-language: Haskell2010
+
+executable whisper-manage
+  main-is: Main.hs
+  hs-source-dirs: app
+  ghc-options: -threaded 
+  build-depends:
+      base >=4.12 && <5
+    , optparse-applicative
+    , whisper
+    , text
+  default-language: Haskell2010
