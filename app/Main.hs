@@ -2,12 +2,13 @@
 {-# language LambdaCase #-}
 {-# language OverloadedStrings #-}
 
-import Control.Monad (forM_)
+import Control.Monad (forM_,when)
 import Data.Functor (($>))
 import Options.Applicative ((<**>))
 import System.Exit (exitFailure)
 import System.Directory (listDirectory,doesDirectoryExist)
-import Data.List (intercalate,stripPrefix)
+import Data.List (intercalate,stripPrefix,isPrefixOf)
+import Data.List.Split (splitOn)
 import Data.Double.Conversion.ByteString (toFixed)
 import Data.ByteString (ByteString)
 
@@ -32,7 +33,7 @@ main = do
   case cmd of
     CommandHeader path -> runHeader path
     CommandData clean path -> runData clean path
-    CommandSend scrub dir carbon -> runSend scrub dir carbon
+    CommandSend scrub prefix dir carbon -> runSend scrub prefix dir carbon
     CommandList dir -> runList dir
       
 runHeader :: String -> IO ()
@@ -52,15 +53,15 @@ runData clean path = IO.withFile path IO.ReadMode W.fromHandle >>= \case
      in LTIO.putStr (TB.toLazyText (builderData whisper1))
 
 runList :: String -> IO ()
-runList root = traverseWhisperDatabase_ root (putStrLn . intercalate ".")
+runList root = traverseWhisperDatabase_ [] root (putStrLn . intercalate ".")
 
-runSend :: Bool -> String -> String -> IO ()
-runSend scrub root carbon = do
+runSend :: Bool -> [String] -> String -> String -> IO ()
+runSend scrub prefix root carbon = do
   let hints = NS.defaultHints { NS.addrSocketType = NS.Stream }
   addr:_ <- NS.getAddrInfo (Just hints) (Just carbon) (Just "2003")
   sock <- NS.socket (NS.addrFamily addr) (NS.addrSocketType addr) (NS.addrProtocol addr)
   NS.connect sock (NS.addrAddress addr)
-  traverseWhisperDatabase_ root $ \subpath -> do
+  traverseWhisperDatabase_ prefix root $ \subpath -> do
     let path = root ++ "/" ++ intercalate "/" subpath ++ ".wsp"
         metric = intercalate "." subpath
         metricBytes = BC.pack metric
@@ -81,7 +82,7 @@ commandParser = P.hsubparser $ mconcat
       (CommandHeader <$> pathParser)
       (P.progDesc "Dump the metadata and archive information from a whisper file.")
   , P.command "send" $ P.info
-      (CommandSend <$> scrubParser <*> directoryParser <*> hostParser)
+      (CommandSend <$> scrubParser <*> prefixParser <*> directoryParser <*> hostParser)
       (P.progDesc "Send metrics from a database of whisper files to carbon.")
   , P.command "list" $ P.info
       (CommandList <$> directoryParser)
@@ -106,6 +107,15 @@ pathParser = P.argument P.str $ mconcat
   , P.help "Path to the whisper file"
   ]
 
+prefixParser :: P.Parser [String]
+prefixParser = fmap (filter (not . null) . splitOn ".") $ P.strOption $ mconcat
+  [ P.metavar "PREFIX"
+  , P.help "Prefix to narrow down targeted metrics, delimited by periods, not slashes"
+  , P.long "prefix"
+  , P.short 'p'
+  , P.value ""
+  ]
+
 cleanParser :: P.Parser Bool
 cleanParser = P.switch $ mconcat
   [ P.long "clean"
@@ -126,6 +136,7 @@ data Command
   | CommandList String
   | CommandSend
       Bool -- scrub
+      [String] -- prefix
       String -- directory
       String -- carbon host
 
@@ -218,20 +229,23 @@ builderArchiveInfo (W.ArchiveInfo offset secondsPerPoint points) =
   <> TBI.decimal (points * 12)
   <> TB.singleton '\n'
 
-traverseWhisperDatabase_ :: FilePath -> ([String] -> IO a) -> IO ()
-traverseWhisperDatabase_ root action = go [] where
+traverseWhisperDatabase_ :: [String] -> FilePath -> ([String] -> IO a) -> IO ()
+traverseWhisperDatabase_ prefix root action = go [] where
   go subpath = do
     ds <- listDirectory (root ++ "/" ++ intercalate "/" (reverse subpath))
     forM_ ds $ \d -> do
       let subpath' = d : subpath
           proper = reverse subpath'
           filename = root ++ "/" ++ intercalate "/" proper
-      isDir <- doesDirectoryExist filename
-      if isDir
-        then go subpath'
-        else case stripSuffix ".wsp" d of
-          Nothing -> pure ()
-          Just d' -> action (reverse (d' : subpath)) $> ()
+      if (isPrefixOf prefix proper || isPrefixOf proper prefix)
+        then do
+          isDir <- doesDirectoryExist filename
+          if isDir
+            then go subpath'
+            else case stripSuffix ".wsp" d of
+              Nothing -> pure ()
+              Just d' -> action (reverse (d' : subpath)) $> ()
+        else return ()
 
 stripSuffix :: Eq a => [a] -> [a] -> Maybe [a]
 stripSuffix a b = reverse <$> stripPrefix (reverse a) (reverse b)

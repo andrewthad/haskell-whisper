@@ -40,6 +40,7 @@ executable whisper-manage
     , optparse-applicative
     , primitive
     , network
+    , split
     , text
     , whisper
   default-language: Haskell2010
