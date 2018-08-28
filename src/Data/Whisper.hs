@@ -19,6 +19,7 @@ module Data.Whisper
   , headerFromHandle
   , headerFromStream
   , clean
+  , scrub
   ) where
 
 import Control.Applicative (liftA3)
@@ -188,9 +189,20 @@ parserAggregation = P.bigEndianWord32 >>= \case
   8 -> pure AbsoluteMin
   w -> P.failureDocumented (WhisperMalformedAggregation w)
 
+-- | Remove all timestamp-value pairs that live at invalid offsets.
+-- The presence of such pairs does not mean that the file is corrupted.
+-- It means that the pair should not be treated as active data.
 clean :: Whisper -> Whisper
 clean (Whisper h@(Header _ infos) archives) = Whisper h $ imapArray
   ( \ix archive -> cleanArchive (archiveInfoSecondsPerPoint (PM.indexArray infos ix)) archive
+  ) archives
+
+-- | Similar to 'clean'. However, it also removes any pairs that have @0@ as the value.
+-- This function does not exist for fundamental reasons, but it is occassionally a useful
+-- convenience.
+scrub :: Whisper -> Whisper
+scrub (Whisper h@(Header _ infos) archives) = Whisper h $ imapArray
+  ( \ix archive -> scrubArchive (archiveInfoSecondsPerPoint (PM.indexArray infos ix)) archive
   ) archives
 
 imapArray :: (Int -> a -> b) -> Array a -> Array b
@@ -212,6 +224,42 @@ cleanArchive !interval (Archive timestamps values)
   | otherwise =
       let !t0 = PM.indexPrimArray timestamps 0
        in filterArchive interval t0 timestamps values
+
+scrubArchive :: Word32 -> Archive -> Archive
+scrubArchive !interval (Archive timestamps values)
+  | PM.sizeofPrimArray timestamps == 0 = emptyArchive
+  | otherwise =
+      let !t0 = PM.indexPrimArray timestamps 0
+       in filterArchivePlus interval t0 timestamps values
+
+filterArchivePlus :: 
+     Word32 -- interval
+  -> Word32 -- initial timestamp
+  -> PrimArray Word32 -- timestamps
+  -> PrimArray Double -- values
+  -> Archive
+filterArchivePlus !interval !t0 !timestamps !values = runST $ do
+  let !sz = PM.sizeofPrimArray timestamps
+  mtimestamps <- PM.newPrimArray sz
+  mvalues <- PM.newPrimArray sz
+  let go !ixSrc !ixDst = if ixSrc < sz
+        then do
+          let !t = PM.indexPrimArray timestamps ixSrc
+              !v = PM.indexPrimArray values ixSrc
+          if fromIntegral t == fromIntegral t0 + (fromIntegral interval * ixSrc) && v /= 0.0
+            then do
+              PM.writePrimArray mtimestamps ixDst t
+              PM.writePrimArray mvalues ixDst v
+              go (ixSrc + 1) (ixDst + 1)
+            else go (ixSrc + 1) ixDst
+        else return ixDst
+  dstLen <- go 0 0
+  mtimestamps' <- PM.resizeMutablePrimArray mtimestamps dstLen
+  timestamps' <- PM.unsafeFreezePrimArray mtimestamps'
+  mvalues' <- PM.resizeMutablePrimArray mvalues dstLen
+  values' <- PM.unsafeFreezePrimArray mvalues'
+  return (Archive timestamps' values')
+
 
 filterArchive :: 
      Word32 -- interval

@@ -32,7 +32,7 @@ main = do
   case cmd of
     CommandHeader path -> runHeader path
     CommandData clean path -> runData clean path
-    CommandSend dir carbon -> runSend dir carbon
+    CommandSend scrub dir carbon -> runSend scrub dir carbon
     CommandList dir -> runList dir
       
 runHeader :: String -> IO ()
@@ -54,8 +54,8 @@ runData clean path = IO.withFile path IO.ReadMode W.fromHandle >>= \case
 runList :: String -> IO ()
 runList root = traverseWhisperDatabase_ root (putStrLn . intercalate ".")
 
-runSend :: String -> String -> IO ()
-runSend root carbon = do
+runSend :: Bool -> String -> String -> IO ()
+runSend scrub root carbon = do
   let hints = NS.defaultHints { NS.addrSocketType = NS.Stream }
   addr:_ <- NS.getAddrInfo (Just hints) (Just carbon) (Just "2003")
   sock <- NS.socket (NS.addrFamily addr) (NS.addrSocketType addr) (NS.addrProtocol addr)
@@ -68,7 +68,7 @@ runSend root carbon = do
       Left err -> LTIO.hPutStrLn IO.stderr
         (TB.toLazyText (TB.fromString metric <> ": " <> showError err))
       Right whisper0 -> do
-        let whisper1 = W.clean whisper0
+        let whisper1 = if scrub then W.scrub whisper0 else W.clean whisper0
         NSLB.sendAll sock (BB.toLazyByteString (toCarbonPlaintext metricBytes whisper1))
         LTIO.putStrLn (TB.toLazyText (TB.fromString metric <> ": Success"))
 
@@ -81,7 +81,7 @@ commandParser = P.hsubparser $ mconcat
       (CommandHeader <$> pathParser)
       (P.progDesc "Dump the metadata and archive information from a whisper file.")
   , P.command "send" $ P.info
-      (CommandSend <$> directoryParser <*> hostParser)
+      (CommandSend <$> scrubParser <*> directoryParser <*> hostParser)
       (P.progDesc "Send metrics from a database of whisper files to carbon.")
   , P.command "list" $ P.info
       (CommandList <$> directoryParser)
@@ -113,11 +113,19 @@ cleanParser = P.switch $ mconcat
   , P.help "Remove metrics with invalid timestamps"
   ]
 
+scrubParser :: P.Parser Bool
+scrubParser = P.switch $ mconcat
+  [ P.long "scrub"
+  , P.short 's'
+  , P.help "Remove metrics whose value is zero"
+  ]
+
 data Command
   = CommandData Bool String
   | CommandHeader String
   | CommandList String
   | CommandSend
+      Bool -- scrub
       String -- directory
       String -- carbon host
 
