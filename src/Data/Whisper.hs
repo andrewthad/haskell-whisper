@@ -18,10 +18,11 @@ module Data.Whisper
   , fromStream
   , headerFromHandle
   , headerFromStream
+  , clean
   ) where
 
 import Control.Applicative (liftA3)
-import Control.Monad.ST (stToIO,ST)
+import Control.Monad.ST (stToIO,ST,runST)
 import Data.Primitive (Array,PrimArray)
 import Data.Word (Word32,Word64)
 import GHC.Int (Int(I#))
@@ -137,8 +138,6 @@ parserHeader = do
   maxRet <- P.bigEndianWord32
   filesFactor <- P.bigEndianFloat
   archiveCount <- P.bigEndianWord32
-  -- TODO: Make this replicate report errors correctly. Currently,
-  -- it does not update the context.
   infos <- P.replicateIndex# (\ix -> PhaseArchive (I# ix)) (word32ToInt archiveCount) parserArchiveInfo
   pure (Header (Metadata agg maxRet filesFactor archiveCount) infos)
 
@@ -152,9 +151,9 @@ parser = do
       let go !ix = if ix < word32ToInt points
             then do
               timestamp <- P.consumption (P.setContext (PhaseData ix) *> P.bigEndianWord32)
-              P.mutation (PM.writePrimArray mutTimestamps 0 timestamp)
+              P.mutation (PM.writePrimArray mutTimestamps ix timestamp)
               value <- P.consumption P.bigEndianWord64
-              P.mutation (PM.writePrimArray mutValues 0 value)
+              P.mutation (PM.writePrimArray mutValues ix value)
               go (ix + 1)
             else pure ()
       go 0
@@ -188,3 +187,57 @@ parserAggregation = P.bigEndianWord32 >>= \case
   7 -> pure AbsoluteMax
   8 -> pure AbsoluteMin
   w -> P.failureDocumented (WhisperMalformedAggregation w)
+
+clean :: Whisper -> Whisper
+clean (Whisper h@(Header _ infos) archives) = Whisper h $ imapArray
+  ( \ix archive -> cleanArchive (archiveInfoSecondsPerPoint (PM.indexArray infos ix)) archive
+  ) archives
+
+imapArray :: (Int -> a -> b) -> Array a -> Array b
+imapArray f a = runST $ do
+  mb <- PM.newArray (PM.sizeofArray a) (error "Data.Whisper.imapArray: logic error")
+  let go i | i == PM.sizeofArray a = return ()
+           | otherwise = do
+               x <- PM.indexArrayM a i
+               PM.writeArray mb i (f i x) >> go (i+1)
+  go 0
+  PM.unsafeFreezeArray mb
+
+emptyArchive :: Archive
+emptyArchive = Archive mempty mempty
+
+cleanArchive :: Word32 -> Archive -> Archive
+cleanArchive !interval (Archive timestamps values)
+  | PM.sizeofPrimArray timestamps == 0 = emptyArchive
+  | otherwise =
+      let !t0 = PM.indexPrimArray timestamps 0
+       in filterArchive interval t0 timestamps values
+
+filterArchive :: 
+     Word32 -- interval
+  -> Word32 -- initial timestamp
+  -> PrimArray Word32 -- timestamps
+  -> PrimArray Double -- values
+  -> Archive
+filterArchive !interval !t0 !timestamps !values = runST $ do
+  let !sz = PM.sizeofPrimArray timestamps
+  mtimestamps <- PM.newPrimArray sz
+  mvalues <- PM.newPrimArray sz
+  let go !ixSrc !ixDst = if ixSrc < sz
+        then do
+          let !t = PM.indexPrimArray timestamps ixSrc 
+          if fromIntegral t == fromIntegral t0 + (fromIntegral interval * ixSrc)
+            then do
+              PM.writePrimArray mtimestamps ixDst t
+              PM.writePrimArray mvalues ixDst (PM.indexPrimArray values ixSrc)
+              go (ixSrc + 1) (ixDst + 1)
+            else go (ixSrc + 1) ixDst
+        else return ixDst
+  dstLen <- go 0 0
+  mtimestamps' <- PM.resizeMutablePrimArray mtimestamps dstLen
+  timestamps' <- PM.unsafeFreezePrimArray mtimestamps'
+  mvalues' <- PM.resizeMutablePrimArray mvalues dstLen
+  values' <- PM.unsafeFreezePrimArray mvalues'
+  return (Archive timestamps' values')
+
+

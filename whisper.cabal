@@ -25,15 +25,21 @@ library
       base >=4.12 && <5
     , packed
     , primitive >= 0.6.4
+  ghc-options: -O2
   default-language: Haskell2010
 
 executable whisper-manage
   main-is: Main.hs
   hs-source-dirs: app
-  ghc-options: -threaded 
+  ghc-options: -threaded -O2
   build-depends:
       base >=4.12 && <5
+    , bytestring
+    , directory
+    , double-conversion
     , optparse-applicative
-    , whisper
+    , primitive
+    , network
     , text
+    , whisper
   default-language: Haskell2010
