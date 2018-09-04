@@ -113,13 +113,13 @@ fromStream :: ByteStream s -> ST s (Either WhisperError Whisper)
 fromStream stream = do
   -- We are free to disregard the leftovers since, in the parser,
   -- we check to make sure we are at the end.
-  P.Result _ e c <- P.parseStreamST stream PhaseMetadata parser
-  pure (convertResult e c)
+  P.Result _ e <- P.parseStreamST stream parser
+  pure e
     
 headerFromStream :: ByteStream s -> ST s (Either WhisperError Header)
 headerFromStream stream = do
-  P.Result _ e c <- P.parseStreamST stream PhaseMetadata parserHeader
-  pure (convertResult e c)
+  P.Result _ e <- P.parseStreamST stream parserHeader
+  pure e
 
 convertResult :: Either (Maybe WhisperMalformed) a -> Phase -> Either WhisperError a
 convertResult e c = case e of
@@ -133,16 +133,16 @@ convertResult e c = case e of
       WhisperMalformedLeftovers -> Left WhisperErrorLeftovers
   Right w -> Right w
 
-parserHeader :: Parser WhisperMalformed Phase Header
+parserHeader :: Parser WhisperError Header
 parserHeader = do
   agg <- parserAggregation
-  maxRet <- P.bigEndianWord32
-  filesFactor <- P.bigEndianFloat
-  archiveCount <- P.bigEndianWord32
-  infos <- P.replicateIndex# (\ix -> PhaseArchive (I# ix)) (word32ToInt archiveCount) parserArchiveInfo
+  maxRet <- P.bigEndianWord32 WhisperErrorMetadata
+  filesFactor <- P.bigEndianFloat WhisperErrorMetadata
+  archiveCount <- P.bigEndianWord32 WhisperErrorMetadata
+  infos <- P.replicateIndex# (\ix -> WhisperErrorArchive (I# ix)) (word32ToInt archiveCount) parserArchiveInfo
   pure (Header (Metadata agg maxRet filesFactor archiveCount) infos)
 
-parser :: Parser WhisperMalformed Phase Whisper
+parser :: Parser WhisperError Whisper
 parser = do
   h@(Header _ infos) <- parserHeader
   archives <- P.statefully $ PM.traverseArrayP
@@ -151,9 +151,9 @@ parser = do
       mutValues <- P.mutation $ PM.newPrimArray (word32ToInt points)
       let go !ix = if ix < word32ToInt points
             then do
-              timestamp <- P.consumption (P.setContext (PhaseData ix) *> P.bigEndianWord32)
+              timestamp <- P.consumption (P.bigEndianWord32 (WhisperErrorData ix))
               P.mutation (PM.writePrimArray mutTimestamps ix timestamp)
-              value <- P.consumption P.bigEndianWord64
+              value <- P.consumption (P.bigEndianWord64 (WhisperErrorData ix))
               P.mutation (PM.writePrimArray mutValues ix value)
               go (ix + 1)
             else pure ()
@@ -163,9 +163,7 @@ parser = do
       let values' = coerceWord64ArrayToDoubleArray values
       pure (Archive timestamps values')
     ) infos
-  P.isEndOfInput >>= \case
-    True -> pure ()
-    False -> P.failureDocumented WhisperMalformedLeftovers
+  P.endOfInput WhisperErrorLeftovers
   pure (Whisper h archives)
     
 word32ToInt :: Word32 -> Int
@@ -174,11 +172,14 @@ word32ToInt = fromIntegral
 coerceWord64ArrayToDoubleArray :: PrimArray Word64 -> PrimArray Double
 coerceWord64ArrayToDoubleArray (PM.PrimArray x) = PM.PrimArray x
 
-parserArchiveInfo :: Parser e c ArchiveInfo
-parserArchiveInfo = liftA3 ArchiveInfo P.bigEndianWord32 P.bigEndianWord32 P.bigEndianWord32
+parserArchiveInfo :: e -> Parser e ArchiveInfo
+parserArchiveInfo e = liftA3 ArchiveInfo
+  (P.bigEndianWord32 e)
+  (P.bigEndianWord32 e)
+  (P.bigEndianWord32 e)
 
-parserAggregation :: Parser WhisperMalformed c Aggregation
-parserAggregation = P.bigEndianWord32 >>= \case
+parserAggregation :: Parser WhisperError Aggregation
+parserAggregation = P.bigEndianWord32 WhisperErrorMetadata >>= \case
   1 -> pure Average
   2 -> pure Sum
   3 -> pure Last
@@ -187,7 +188,7 @@ parserAggregation = P.bigEndianWord32 >>= \case
   6 -> pure AverageZero
   7 -> pure AbsoluteMax
   8 -> pure AbsoluteMin
-  w -> P.failureDocumented (WhisperMalformedAggregation w)
+  w -> P.failure (WhisperErrorAggregation w)
 
 -- | Remove all timestamp-value pairs that live at invalid offsets.
 -- The presence of such pairs does not mean that the file is corrupted.
